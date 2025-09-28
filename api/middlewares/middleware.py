@@ -1,15 +1,20 @@
-from django.utils.deprecation import MiddlewareMixin
-from rest_framework_simplejwt.authentication import JWTAuthentication
-from api.models import BlacklistedAccessToken
-from django.http import JsonResponse  # ✅ use Django response
+"""
+Middleware that rejects requests bearing a blacklisted access token.
 
-
-
-# api/middleware.py
+Notes:
+- Prefer to perform blacklist checks in the authentication backend so they only run
+  when authentication is attempted. This middleware is appropriate if you want
+  a simple pre-auth check, but it will run on every request (DB hits).
+- Make sure BlacklistedAccessToken.jti is indexed and consider using a cache (Redis)
+  to reduce DB load for high-traffic apps.
+"""
+import logging
+from django.http import JsonResponse
 from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
-from django.http import JsonResponse
+from api.models import BlacklistedAccessToken
 
+logger = logging.getLogger(__name__)
 
 class BlacklistAccessTokenMiddleware:
     def __init__(self, get_response):
@@ -17,106 +22,36 @@ class BlacklistAccessTokenMiddleware:
         self.auth = JWTAuthentication()
 
     def __call__(self, request):
+        # Extract the header and raw token using the same helpers the authentication class uses
         header = self.auth.get_header(request)
-
         if header:
             try:
-                # Extract and validate the token
                 raw_token = self.auth.get_raw_token(header)
                 if raw_token is None:
-                    raise InvalidToken("No raw token found")
+                    # No raw token present, let auth flow handle missing token
+                    return self.get_response(request)
 
                 validated_token = self.auth.get_validated_token(raw_token)
                 jti = validated_token.get("jti")
-
-                # Check if token is blacklisted
-                if BlacklistedAccessToken.objects.filter(jti=jti).exists():
-                    return JsonResponse(
-                        {"status": "error", "data": {}, "message": "Token blacklisted"},
-                        status=401
-                    )
-
-            except (InvalidToken, TokenError):
-                return JsonResponse(
-                    {"status": "error", "data": {}, "message": "Given token not valid or expired"},
-                    status=401
-                )
-
-        # If no token or valid, continue request
-        return self.get_response(request)
-
-
-
-class BlacklistAccessTokenMiddlewareOLLLLLLDDDD:
-    def __init__(self, get_response):
-        self.get_response = get_response
-        self.auth = JWTAuthentication()
-
-    def __call__(self, request):
-        header = self.auth.get_header(request)
-        if header:
-            try:
-                raw_token = self.auth.get_raw_token(header)
-                validated_token = self.auth.get_validated_token(raw_token)
-                jti = validated_token.get("jti")
-
-                if BlacklistedAccessToken.objects.filter(jti=jti).exists():
-                    return JsonResponse({"status": "error", "message": "Token blacklisted"}, status=401)
-
-            except (InvalidToken, TokenError):
-                return JsonResponse({"status": "error", "message": "Given token not valid or expired"}, status=401)
-
-        return self.get_response(request)
-
-
-class BlacklistAccessTokenMiddlewareNewold:
-    def __init__(self, get_response):
-        self.get_response = get_response
-        self.auth = JWTAuthentication()
-
-    def __call__(self, request):
-        header = self.auth.get_header(request)
-        if header is not None:
-            try:
-                raw_token = self.auth.get_raw_token(header)
-                if raw_token is not None:
-                    validated_token = self.auth.get_validated_token(raw_token)
-                    jti = validated_token.get("jti")
-
+                if jti:
+                    # DB check: consider replacing with cache lookup in production
                     if BlacklistedAccessToken.objects.filter(jti=jti).exists():
+                        logger.info("Rejected request with blacklisted token (jti=%s)", jti)
                         return JsonResponse(
-                            {"status": "error", "message": "Token blacklisted", "code": 401},
-                            status=401
+                            {"status": "error", "data": {}, "message": "Token blacklisted"},
+                            status=401,
                         )
-            except (InvalidToken, TokenError):
+            except (InvalidToken, TokenError) as e:
+                logger.info("Invalid/expired token in middleware: %s", e)
                 return JsonResponse(
-                    {"status": "error", "message": "Given token not valid or expired", "code": 401},
-                    status=401
+                    {"status": "error", "data": {}, "message": "342342Given token not valid or expired"},
+                    status=401,
                 )
+            except Exception:
+                # Catch unexpected errors but do not leak details
+                logger.exception("Unexpected error while checking token blacklist")
+                # Allow request to proceed if you prefer not to block users on middleware errors,
+                # or return a 500 to be strict. Here we proceed.
+                return self.get_response(request)
 
         return self.get_response(request)
-
-class BlacklistAccessTokenMiddlewareOLD(MiddlewareMixin):
-    def process_request(self, request):
-        auth = JWTAuthentication()
-        header = auth.get_header(request)
-
-        if header is None:
-            return None  # no auth → skip
-
-        raw_token = auth.get_raw_token(header)
-        if raw_token is None:
-            return None
-
-        validated_token = auth.get_validated_token(raw_token)
-
-        jti = validated_token.get("jti")
-        if BlacklistedAccessToken.objects.filter(jti=jti).exists():
-            return JsonResponse(
-                {"detail": "Token blacklisted"},
-                status=401
-            )
-
-            # from rest_framework.response import Response
-            # from rest_framework import status
-            # return Response({"detail": "Token blacklisted"}, status=status.HTTP_401_UNAUTHORIZED)
