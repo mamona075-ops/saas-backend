@@ -6,3 +6,4 @@ psycopg2-binary
 celery[redis]
 stripe
 gunicorn
+django-redis>=5.0.0
